@@ -102,7 +102,7 @@ class AppGUI:
         ttk.Button(btns, text="保存配置", command=self._save_config).pack(side="left", padx=4)
         ttk.Button(btns, text="开始抓取", command=self._start).pack(side="left", padx=4)
         ttk.Button(btns, text="停止", command=self._stop).pack(side="left", padx=4)
-        ttk.Button(btns, text="处理", command=self._stop).pack(side="left", padx=4)
+        ttk.Button(btns, text="处理已有图片", command=self._process_existing_session).pack(side="left", padx=4)
         row += 1
 
         self.log_text = tk.Text(frm, width=100, height=24)
@@ -300,6 +300,123 @@ class AppGUI:
         except queue.Empty:
             pass
         self.root.after(100, self._poll_logs)
+
+    def _process_existing_session(self):
+        if self.worker and self.worker.is_alive():
+            messagebox.showwarning("提示", "当前已有任务在运行")
+            return
+
+        session_dir = filedialog.askdirectory(title="选择已有抓图会话目录")
+        if not session_dir:
+            return
+
+        try:
+            self._save_config()
+        except Exception:
+            return
+
+        self.stop_flag.clear()
+        self.worker = threading.Thread(
+            target=self._run_existing_session_worker,
+            args=(Path(session_dir),),
+            daemon=True,
+        )
+        self.worker.start()
+
+        
+    def _run_existing_session_worker(self, session_dir: Path):
+        try:
+            cfg = AppConfig.load(self.config_path)
+            if cfg.text_roi is None:
+                raise RuntimeError("必须先设置正文 ROI")
+
+            output_dir = Path(cfg.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            run_name = session_dir.name
+
+            raw_dir = session_dir / "captured_raw"
+            filtered_dir = session_dir / "captured_filtered"
+            filtered_dir.mkdir(parents=True, exist_ok=True)
+
+            if not raw_dir.exists():
+                raise RuntimeError(f"未找到抓图目录: {raw_dir}")
+
+            mode = self.mode_var.get()
+
+            if mode == "screen":
+                capture_roi = union_rect(cfg.text_roi, cfg.speaker_roi)
+                local_text_roi = to_local_rect(cfg.text_roi, capture_roi)
+                local_speaker_roi = to_local_rect(cfg.speaker_roi, capture_roi)
+            else:
+                local_text_roi = cfg.text_roi
+                local_speaker_roi = cfg.speaker_roi
+
+            backend = OCRBackend(lang=cfg.ocr.lang, use_gpu=cfg.ocr.use_gpu)
+            processor = BatchPostProcessor(
+                ocr_backend=backend,
+                preprocessor=ImagePreprocessor(
+                    scale=cfg.ocr.scale,
+                    binarize=cfg.ocr.binarize,
+                    invert=cfg.ocr.invert,
+                ),
+                deduplicator=Deduplicator(
+                    similarity_threshold=cfg.ocr.similarity_threshold
+                ),
+                output_dir=output_dir,
+                run_name=run_name,
+                speaker_roi=local_speaker_roi,
+                min_text_len=cfg.ocr.min_text_len,
+                min_score=cfg.ocr.min_score,
+                filterer=FrameFilter(),
+            )
+
+            raw_frames = []
+            for image_path in sorted(raw_dir.glob("*.png")):
+                parts = image_path.stem.split("_")
+                frame_idx = int(parts[0]) if parts else 0
+                ts_ms = int(parts[1]) if len(parts) > 1 else 0
+                raw_frames.append((frame_idx, ts_ms / 1000.0, image_path))
+
+            frame_objs = [
+                type(
+                    "FrameObj",
+                    (),
+                    {
+                        "frame_index": idx,
+                        "timestamp_sec": ts,
+                        "image_path": path,
+                        "source": mode,
+                        "diff_score": 0.0,
+                    },
+                )()
+                for idx, ts, path in raw_frames
+            ]
+
+            self.log_queue.put(f"开始处理已有图片，会话目录: {session_dir}")
+            self.log_queue.put(f"读取到原始图片 {len(frame_objs)} 张")
+
+            kept = processor.filter_frames(
+                frame_objs,
+                filtered_dir,
+                log=self.log_queue.put,
+            )
+            self.log_queue.put(f"筛选完成，保留 {len(kept)} 张图片，开始 OCR。")
+
+            txt_path, jsonl_path, record_count = processor.run_ocr(
+                kept,
+                log=self.log_queue.put,
+            )
+
+            self.log_queue.put(f"OCR 完成，共输出 {record_count} 条文本。")
+            self.log_queue.put(f"文本文件: {txt_path}")
+            self.log_queue.put(f"结构化文件: {jsonl_path}")
+            self.log_queue.put("任务结束。")
+
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.log_queue.put(f"错误: {exc}")
 
 
 def run_gui(config_path: str | Path = "config.json") -> None:

@@ -315,31 +315,3 @@ def crop(frame: np.ndarray, roi: Rect) -> np.ndarray:
 
     return frame[y1:y2, x1:x2].copy()
 
-def process_existing_images(
-    image_dir: Path,
-    output_dir: Path,
-    extractor: TextExtractor
-):
-    import cv2
-    from datetime import datetime
-
-    images = sorted(image_dir.glob("*.png"))
-
-    records = []
-    idx = 0
-
-    for img_path in images:
-        img = cv2.imread(str(img_path))
-        if img is None:
-            continue
-
-        # 模拟 frame 输入
-        result = extractor.process_stream(
-            [(idx, 0.0, img, 0.0)],
-            source_name="offline",
-            save_changed_frames_only=False,
-        )
-
-        idx += 1
-
-    extractor.finalize()
