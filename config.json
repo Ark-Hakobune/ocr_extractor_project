@@ -1,0 +1,36 @@
+{
+  "output_dir": "C:/workplace/textdata/sakuranouta",
+  "debug_dir": "C:/workplace/textdata/sakuranouta/sessions",
+  "speaker_roi": [
+    267,
+    756,
+    402,
+    54
+  ],
+  "text_roi": [
+    275,
+    816,
+    1113,
+    115
+  ],
+  "screen": {
+    "interval_sec": 0.01,
+    "diff_threshold": 2.0,
+    "save_changed_frames_only": false
+  },
+  "video": {
+    "sample_every_n_frames": 1,
+    "diff_threshold": 2.0,
+    "save_changed_frames_only": false
+  },
+  "ocr": {
+    "lang": "ch",
+    "use_gpu": false,
+    "scale": 2.0,
+    "binarize": false,
+    "invert": false,
+    "min_text_len": 2,
+    "min_score": 0.55,
+    "similarity_threshold": 94
+  }
+}
