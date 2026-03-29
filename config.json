@@ -2,19 +2,19 @@
   "output_dir": "C:/workplace/textdata/sakuranouta",
   "debug_dir": "C:/workplace/textdata/sakuranouta/sessions",
   "speaker_roi": [
-    267,
-    756,
-    402,
-    54
+    292,
+    780,
+    120,
+    33
   ],
   "text_roi": [
-    275,
-    816,
-    1113,
-    115
+    277,
+    822,
+    1129,
+    119
   ],
   "screen": {
-    "interval_sec": 0.01,
+    "interval_sec": 0.1,
     "diff_threshold": 2.0,
     "save_changed_frames_only": false
   },
@@ -25,7 +25,6 @@
   },
   "ocr": {
     "lang": "ch",
-    "use_gpu": false,
     "scale": 2.0,
     "binarize": false,
     "invert": false,

@@ -1,0 +1,4 @@
+__pycache__/
+./ocr_text_extractor/__pycache__/
+*.pyc
+.vscode/

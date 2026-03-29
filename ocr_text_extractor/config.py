@@ -25,7 +25,6 @@ class VideoConfig:
 @dataclass
 class OCRConfig:
     lang: str = "ch"
-    use_gpu: bool = False
     scale: float = 2.0
     binarize: bool = False
     invert: bool = False

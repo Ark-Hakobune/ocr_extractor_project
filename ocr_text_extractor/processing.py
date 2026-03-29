@@ -10,7 +10,6 @@ import cv2
 import numpy as np
 from rapidfuzz import fuzz
 
-from .config import Rect
 from .utils import format_record, is_ui_noise, sanitize_dialogue, sanitize_speaker
 
 
@@ -24,14 +23,16 @@ class OCRRecord:
     score: float
     frame_index: Optional[int] = None
     diff_score: Optional[float] = None
-    image_name: Optional[str] = None
+    text_image_name: Optional[str] = None
+    speaker_image_name: Optional[str] = None
 
 
 @dataclass
 class CapturedFrame:
     frame_index: int
     timestamp_sec: float
-    image_path: Path
+    text_image_path: Path
+    speaker_image_path: Optional[Path]
     source: str
     diff_score: Optional[float] = None
 
@@ -165,10 +166,21 @@ class BatchCaptureSession:
     def __init__(self, root_dir: Path, source_name: str) -> None:
         self.root_dir = root_dir
         self.source_name = source_name
+
         self.raw_dir = self.root_dir / "captured_raw"
         self.filtered_dir = self.root_dir / "captured_filtered"
-        self.raw_dir.mkdir(parents=True, exist_ok=True)
-        self.filtered_dir.mkdir(parents=True, exist_ok=True)
+
+        self.raw_text_dir = self.raw_dir / "text"
+        self.raw_speaker_dir = self.raw_dir / "speaker"
+
+        self.filtered_text_dir = self.filtered_dir / "text"
+        self.filtered_speaker_dir = self.filtered_dir / "speaker"
+
+        self.raw_text_dir.mkdir(parents=True, exist_ok=True)
+        self.raw_speaker_dir.mkdir(parents=True, exist_ok=True)
+        self.filtered_text_dir.mkdir(parents=True, exist_ok=True)
+        self.filtered_speaker_dir.mkdir(parents=True, exist_ok=True)
+
         self.meta_path = self.root_dir / "capture_index.jsonl"
         self.meta_fh = self.meta_path.open("w", encoding="utf-8")
         self._count = 0
@@ -177,21 +189,46 @@ class BatchCaptureSession:
     def count(self) -> int:
         return self._count
 
-    def save_frame(self, frame_index: int, timestamp_sec: float, image: np.ndarray, diff_score: Optional[float] = None) -> CapturedFrame:
-        filename = f"{frame_index:06d}_{int(timestamp_sec * 1000):010d}.png"
-        path = self.raw_dir / filename
-        cv2.imwrite(str(path), image)
+    def save_frame(
+        self,
+        frame_index: int,
+        timestamp_sec: float,
+        text_image: np.ndarray,
+        speaker_image: Optional[np.ndarray] = None,
+        diff_score: Optional[float] = None,
+    ) -> CapturedFrame:
+        base_name = f"{frame_index:06d}_{int(timestamp_sec * 1000):010d}.png"
+
+        text_path = self.raw_text_dir / base_name
+        cv2.imwrite(str(text_path), text_image)
+
+        speaker_path = None
+        speaker_name = None
+        if speaker_image is not None and speaker_image.size != 0:
+            speaker_path = self.raw_speaker_dir / base_name
+            cv2.imwrite(str(speaker_path), speaker_image)
+            speaker_name = base_name
+
         rec = {
             "frame_index": frame_index,
             "timestamp_sec": round(timestamp_sec, 6),
             "source": self.source_name,
             "diff_score": diff_score,
-            "image_name": filename,
+            "text_image_name": base_name,
+            "speaker_image_name": speaker_name,
         }
         self.meta_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self.meta_fh.flush()
         self._count += 1
-        return CapturedFrame(frame_index, timestamp_sec, path, self.source_name, diff_score)
+
+        return CapturedFrame(
+            frame_index=frame_index,
+            timestamp_sec=timestamp_sec,
+            text_image_path=text_path,
+            speaker_image_path=speaker_path,
+            source=self.source_name,
+            diff_score=diff_score,
+        )
 
     def close(self) -> None:
         self.meta_fh.close()
@@ -205,7 +242,6 @@ class BatchPostProcessor:
         deduplicator: Deduplicator,
         output_dir: Path,
         run_name: str,
-        speaker_roi: Optional[Rect],
         min_text_len: int = 2,
         min_score: float = 0.55,
         filterer: Optional[FrameFilter] = None,
@@ -215,7 +251,6 @@ class BatchPostProcessor:
         self.deduplicator = deduplicator
         self.output_dir = output_dir
         self.run_name = run_name
-        self.speaker_roi = speaker_roi
         self.min_text_len = min_text_len
         self.min_score = min_score
         self.filterer = filterer or FrameFilter()
@@ -228,22 +263,45 @@ class BatchPostProcessor:
                 cv2.imwrite(str(dst), image)
         return dst
 
-    def filter_frames(self, frames: Iterable[CapturedFrame], filtered_dir: Path, log=None) -> List[CapturedFrame]:
+    def filter_frames(
+        self,
+        frames: Iterable[CapturedFrame],
+        filtered_text_dir: Path,
+        filtered_speaker_dir: Optional[Path] = None,
+        log=None,
+    ) -> List[CapturedFrame]:
         kept: List[CapturedFrame] = []
-        filtered_dir.mkdir(parents=True, exist_ok=True)
+        filtered_text_dir.mkdir(parents=True, exist_ok=True)
+        if filtered_speaker_dir is not None:
+            filtered_speaker_dir.mkdir(parents=True, exist_ok=True)
+
         for frame in frames:
-            image = cv2.imread(str(frame.image_path))
+            image = cv2.imread(str(frame.text_image_path))
             if image is None:
                 if log:
-                    log(f"筛除 {frame.image_path.name}: 读取失败")
+                    log(f"筛除 {frame.text_image_path.name}: 读取失败")
                 continue
             keep, reason = self.filterer.keep(image)
             if not keep:
                 if log:
-                    log(f"筛除 {frame.image_path.name}: {reason}")
+                    log(f"筛除 {frame.text_image_path.name}: {reason}")
                 continue
-            dst = self._copy_filtered(frame.image_path, filtered_dir)
-            kept.append(CapturedFrame(frame.frame_index, frame.timestamp_sec, dst, frame.source, frame.diff_score))
+
+            text_dst = self._copy_filtered(frame.text_image_path, filtered_text_dir)
+            speaker_dst = None
+            if filtered_speaker_dir is not None and frame.speaker_image_path is not None and frame.speaker_image_path.exists():
+                speaker_dst = self._copy_filtered(frame.speaker_image_path, filtered_speaker_dir)
+
+            kept.append(
+                CapturedFrame(
+                    frame_index=frame.frame_index,
+                    timestamp_sec=frame.timestamp_sec,
+                    text_image_path=text_dst,
+                    speaker_image_path=speaker_dst,
+                    source=frame.source,
+                    diff_score=frame.diff_score,
+                )
+            )
         return kept
 
     def run_ocr(self, frames: Iterable[CapturedFrame], log=None) -> tuple[Path, Path, int]:
@@ -251,20 +309,21 @@ class BatchPostProcessor:
         record_index = 0
         try:
             for frame in frames:
-                image = cv2.imread(str(frame.image_path))
+                image = cv2.imread(str(frame.text_image_path))
                 if image is None:
                     continue
-
-                speaker = ""
-                if self.speaker_roi is not None:
-                    speaker_crop = crop(image, self.speaker_roi)
-                    speaker_img = self.preprocessor(speaker_crop)
-                    speaker, _ = self.ocr_backend.recognize(speaker_img)
-                    speaker = sanitize_speaker(speaker)
 
                 text_img = self.preprocessor(image)
                 text, score = self.ocr_backend.recognize(text_img)
                 text = sanitize_dialogue(text)
+
+                speaker = ""
+                if frame.speaker_image_path is not None and frame.speaker_image_path.exists():
+                    speaker_image = cv2.imread(str(frame.speaker_image_path))
+                    if speaker_image is not None:
+                        speaker_img = self.preprocessor(speaker_image)
+                        speaker, _ = self.ocr_backend.recognize(speaker_img)
+                        speaker = sanitize_speaker(speaker)
 
                 if len(text) < self.min_text_len:
                     continue
@@ -272,8 +331,7 @@ class BatchPostProcessor:
                     continue
                 if is_ui_noise(text):
                     continue
-                key = f"{speaker}|{text}" if speaker else text
-                if self.deduplicator.is_duplicate(key):
+                if self.deduplicator.is_duplicate(text):
                     continue
 
                 record = OCRRecord(
@@ -285,7 +343,8 @@ class BatchPostProcessor:
                     score=round(score, 4),
                     frame_index=frame.frame_index,
                     diff_score=round(frame.diff_score, 4) if frame.diff_score is not None else None,
-                    image_name=frame.image_path.name,
+                    text_image_name=frame.text_image_path.name,
+                    speaker_image_name=frame.speaker_image_path.name if frame.speaker_image_path else None,
                 )
                 writer.write(record)
                 if log:
@@ -294,24 +353,3 @@ class BatchPostProcessor:
         finally:
             writer.close()
         return writer.clean_path, writer.raw_path, record_index
-
-
-def crop(frame: np.ndarray, roi: Rect) -> np.ndarray:
-    if frame is None or frame.size == 0:
-        return np.empty((0, 0, 3), dtype=np.uint8)
-
-    x, y, w, h = roi
-    fh, fw = frame.shape[:2]
-
-    x1 = max(0, x)
-    y1 = max(0, y)
-    x2 = min(fw, x + w)
-    y2 = min(fh, y + h)
-
-    if x2 <= x1 or y2 <= y1:
-        if frame.ndim == 2:
-            return np.empty((0, 0), dtype=frame.dtype)
-        return np.empty((0, 0, frame.shape[2]), dtype=frame.dtype)
-
-    return frame[y1:y2, x1:x2].copy()
-

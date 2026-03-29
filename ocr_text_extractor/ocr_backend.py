@@ -16,32 +16,46 @@ else:
 
 
 class OCRBackend:
-    def __init__(self, lang: str = "ch", use_gpu: bool = False) -> None:
+    def __init__(self, lang: str = "ch") -> None:
         if PaddleOCR is None:
             raise RuntimeError(
                 "PaddleOCR 未安装。请先安装依赖，例如：\n"
                 "pip install paddleocr paddlepaddle opencv-python mss rapidfuzz numpy"
             ) from OCR_IMPORT_ERROR
-        self.ocr = PaddleOCR(use_angle_cls=False, lang=lang, use_gpu=use_gpu, show_log=False)
+        self.ocr = PaddleOCR(use_angle_cls=False, lang=lang)
 
     def recognize(self, image: np.ndarray) -> Tuple[str, float]:
-        result = self.ocr.ocr(image, cls=False)
+        result = self.ocr.predict(image)
         if not result:
             return "", 0.0
 
         lines: List[str] = []
         scores: List[float] = []
-        for block in result:
-            if not block:
-                continue
-            for item in block:
-                if not item or len(item) < 2:
-                    continue
-                text, score = item[1][0], float(item[1][1])
-                text = normalize_text(text)
-                if text:
-                    lines.append(text)
-                    scores.append(score)
+        for item in result:
+            # 新版 PaddleOCR（dict）
+            if isinstance(item, dict):
+                texts = item.get("rec_texts", [])
+                scs = item.get("rec_scores", [])
+                for t, s in zip(texts, scs):
+                    t = normalize_text(str(t))
+                    if t:
+                        lines.append(t)
+                        scores.append(float(s))
+
+            # 旧版 PaddleOCR（兼容）
+            elif isinstance(item, (list, tuple)):
+                for sub in item:
+                    if (
+                        isinstance(sub, (list, tuple))
+                        and len(sub) >= 2
+                        and isinstance(sub[1], (list, tuple))
+                        and len(sub[1]) >= 2
+                    ):
+                        t = normalize_text(str(sub[1][0]))
+                        s = float(sub[1][1])
+                        if t:
+                            lines.append(t)
+                            scores.append(s)
 
         if not lines:
             return "", 0.0
